@@ -1,0 +1,43 @@
+name: Playwright Flood Python
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'URL cần test'
+        required: true
+        default: 'https://example.com'
+      duration:
+        description: 'Thời gian test (giây)'
+        required: true
+        default: '45'
+      concurrency:
+        description: 'Số tab song song trong mỗi job'
+        required: true
+        default: '10'
+
+jobs:
+  flood:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        instance: [1, 2, 3, 4, 5, 6, 7, 8,9,10,11,12,13,14,15,16,17,18,19,20]
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium
+
+      - name: Run Flood
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url }}
+          DURATION: ${{ github.event.inputs.duration }}
+          CONCURRENCY: ${{ github.event.inputs.concurrency }}
+        run: python playwright_flood.py
